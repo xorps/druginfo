@@ -2,90 +2,119 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:http/http.dart' as http;
+import 'state_machine.dart';
 
 void main() => runApp(App());
 
-abstract class SearchStatus {
-  T match<T>(T Function(Idle) caseIdle, T Function(Loading) caseLoading, T Function(Ready) caseReady);
-}
-
-class Idle extends SearchStatus {
-  T match<T>(T Function(Idle) caseIdle, T Function(Loading) caseLoading, T Function(Ready) caseReady) => caseIdle(this);
-}
-
-class Loading extends SearchStatus {
-  T match<T>(T Function(Idle) caseIdle, T Function(Loading) caseLoading, T Function(Ready) caseReady) => caseLoading(this);
-}
-
-class Ready extends SearchStatus {
-  final String result;
-
-  Ready(this.result);
-
-  T match<T>(T Function(Idle) caseIdle, T Function(Loading) caseLoading, T Function(Ready) caseReady) => caseReady(this);
-}
-
-class SearchBar extends StatefulWidget {
-  @override
-  State<SearchBar> createState() => SearchBarState();
-}
-
-class SearchBarState extends State<SearchBar> {
-  SearchStatus _status = Idle();
-
-  void _onSubmitted(String text) async {
-    setState(() {
-      _status = Loading();
-    });
-
+mixin SearchField on FsmState {
+  void onSubmitted(String text) async {
+    setState(Loading());
     try {
-      final url = Uri.parse('https://api.fda.gov/drug/label.json?search=openfda.product_ndc:"$text"');
+      final url = Uri.parse('https://api.fda.gov/drug/label.json?search=openfda.product_ndc:"$text"&limit=1');
       final result = await http.get(url);
       final txt = result.body;
-      setState(() {
-        _status = Ready(txt);
-      });
+      final json = jsonDecode(txt);
+      if (json is Map && json["error"] is Map && json["error"]["message"] is String) {
+        setState(ApiErrorMessage(json["error"]["message"]));
+      } else if (json is Map && json["results"] is List) {
+        final results = json["results"] as List<dynamic>;
+        if (results.length > 0 && results.first is Map) {
+          setState(Ready(results.first));
+        } else {
+          setState(EmptyResults());
+        }
+      }
     } catch (err) {
-      setState(() {
-        _status = Ready("Error: $err");
-      });
+      setState(CaughtError(err));
     }
   }
 
+  Widget searchField() => CupertinoSearchTextField(placeholder: 'Product NDC', onSubmitted: onSubmitted);
+}
+
+class Idle extends FsmState with SearchField {
   @override
-  Widget build(BuildContext ctx) {
-    return _status.match(
-      (Idle _) => CupertinoSearchTextField(onSubmitted: _onSubmitted),
-      (Loading _) => CupertinoActivityIndicator(), 
-      (Ready r) => Column(children: [CupertinoSearchTextField(onSubmitted: _onSubmitted), Text(r.result)]),
+  Widget render() => searchField();
+}
+
+class Loading extends FsmState {
+  @override
+  Widget render() => CupertinoActivityIndicator();
+}
+
+class Drug {
+  final String name;
+  Drug({required this.name});
+}
+
+class Ready extends FsmState with SearchField {
+  final Map _result;
+
+  Ready(this._result);
+
+  static Widget _renderEntry(MapEntry<dynamic, dynamic> entry) {
+    final key = Text(entry.key);
+    final value = Text(entry.value);
+    final decoration = BoxDecoration(color: CupertinoColors.extraLightBackgroundGray, borderRadius: BorderRadius.circular(10));
+    return Container(margin: EdgeInsets.symmetric(vertical: 10), padding: EdgeInsets.all(10), decoration: decoration, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [key, value]));
+  }
+
+  Widget _renderResult() {
+    final children = _result.entries.where((entry) => entry.value is String).map(_renderEntry).toList();
+    return ListView(
+      children: children,
+      primary: false
     );
   }
+
+  @override
+  Widget render() => Column(children: [searchField(), Expanded(child: _renderResult())]);
+}
+
+class ApiErrorMessage extends FsmState with SearchField {
+  final String _message;
+
+  ApiErrorMessage(this._message);
+
+  @override
+  Widget render() => Column(children: [searchField(), Text(_message)]);
+}
+
+class CaughtError extends FsmState with SearchField {
+  final dynamic _err;
+
+  CaughtError(this._err);
+
+  @override
+  Widget render() => Column(children: [searchField(), Text("Error: $_err")]);
+}
+
+class EmptyResults extends FsmState with SearchField {
+  @override
+  Widget render() => Column(children: [searchField(), Text("No Results")]);
+}
+
+class SearchBar extends StateMachineWidget {
+  @override
+  initialState() => Idle();
 }
 
 class App extends StatelessWidget {
   @override
-  build(ctx) => MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(primarySwatch: Colors.purple),
-      home: HomePage(title: 'Drug Info'));
+  Widget build(BuildContext ctx) {
+    return CupertinoApp(
+      title: 'Flutter Demo', 
+      home: HomePage()
+    );
+  }
 }
 
-class HomePage extends StatefulWidget {
-  final String title;
-
-  HomePage({Key? key, required this.title}) : super(key: key);
-
+class HomePage extends StatelessWidget {
   @override
-  createState() => HomePageState();
-}
-
-class HomePageState extends State<HomePage> {
-  @override
-  build(ctx) => Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
-      body: Center(
-          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        SafeArea(
-            minimum: EdgeInsets.symmetric(horizontal: 20), child: SearchBar())
-      ])));
+  Widget build(BuildContext ctx) {
+    return CupertinoPageScaffold(
+      navigationBar: CupertinoNavigationBar(middle: Text('Drug Info')),
+      child: SafeArea(minimum: EdgeInsets.symmetric(vertical: 100, horizontal: 20), child: SearchBar()),
+    );
+  }
 }
